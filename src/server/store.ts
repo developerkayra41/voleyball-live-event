@@ -1,10 +1,15 @@
 import { createHash, randomBytes } from "node:crypto";
 import { existsSync, readFileSync, writeFileSync, renameSync } from "node:fs";
-import type { CreateEventInput, EventSummary, VoteEvent } from "../shared/types.js";
+import type { CreateEventInput, EventSummary, LogEntry, VoteEvent } from "../shared/types.js";
 
 const DATA_FILE = process.env.DATA_FILE ?? "data.json";
 const MAX_PENDING_PER_CREATOR = 5;
-const DAY = 24 * 60 * 60 * 1000;
+const HOUR = 60 * 60 * 1000;
+const DAY = 24 * HOUR;
+const DEFAULT_LOCK_HOURS = 2;
+
+const hhmm = (ms: number) =>
+  new Date(ms).toLocaleTimeString("tr-TR", { hour: "2-digit", minute: "2-digit", timeZone: "Europe/Istanbul" });
 
 /** Sunucuda tutulan hali: gerçek clientId'ler burada kalır, dışarı çıkmaz. */
 interface StoredJoin {
@@ -12,7 +17,10 @@ interface StoredJoin {
   name: string;
   at: number;
   seq: number;
+  promotedAt?: number;
 }
+type StoredLog = Omit<LogEntry, "pid"> & { clientId: string };
+const MAX_LOG = 200;
 interface StoredEvent {
   id: string;
   title: string;
@@ -20,12 +28,14 @@ interface StoredEvent {
   note?: string;
   openAt: number;
   matchAt: number;
+  lockAt: number;
   capacity: number;
   createdBy: string;
   creatorId: string;
   createdAt: number;
   confirmedAt?: number;
   joins: StoredJoin[];
+  log: StoredLog[];
 }
 
 const events = new Map<string, StoredEvent>();
@@ -43,11 +53,12 @@ export function pidOf(clientId: string): string {
 }
 
 function toPublic(ev: StoredEvent): VoteEvent {
-  const { creatorId, joins, ...rest } = ev;
+  const { creatorId, joins, log, ...rest } = ev;
   return {
     ...rest,
     creatorPid: pidOf(creatorId),
     joins: joins.map(({ clientId, ...j }) => ({ ...j, pid: pidOf(clientId) })),
+    log: log.map(({ clientId, ...l }) => ({ ...l, pid: pidOf(clientId) })),
   };
 }
 
@@ -84,6 +95,8 @@ export function load() {
     for (const ev of raw.events ?? []) {
       // Maç tarihi eklenmeden önce oluşturulmuş eventler: açılıştan 1 gün sonrası say
       if (!Number.isFinite(ev.matchAt)) ev.matchAt = ev.openAt + DAY;
+      ev.log ??= [];
+      if (!Number.isFinite(ev.lockAt)) ev.lockAt = Math.max(ev.openAt, ev.matchAt - DEFAULT_LOCK_HOURS * HOUR);
       events.set(ev.id, ev);
     }
     console.log(`${events.size} event yüklendi (${DATA_FILE})`);
@@ -114,6 +127,7 @@ export function summaries(): EventSummary[] {
       location: e.location,
       openAt: e.openAt,
       matchAt: e.matchAt,
+      lockAt: e.lockAt,
       capacity: e.capacity,
       createdBy: e.createdBy,
       confirmedAt: e.confirmedAt,
@@ -134,6 +148,11 @@ export function create(input: CreateEventInput, creatorId: string, creatorName: 
   if (openAt < now) openAt = now;
   if (matchAt > now + 60 * DAY) throw new StoreError("Maç en fazla 60 gün sonrası olabilir");
   if (matchAt <= openAt) throw new StoreError("Maç tarihi oylamanın açılışından sonra olmalı");
+  const rawLock = Number(input.lockHours);
+  const lockHours = Number.isFinite(rawLock) ? Math.min(72, Math.max(0, rawLock)) : DEFAULT_LOCK_HOURS;
+  const lockAt = matchAt - lockHours * HOUR;
+  if (lockAt <= openAt)
+    throw new StoreError("Kayıtlar oylama açılmadan kapanmış olur; kapanış süresini kısalt ya da oylamayı daha erken aç");
   const pending = [...events.values()].filter((e) => e.creatorId === creatorId && e.openAt > now).length;
   if (pending >= MAX_PENDING_PER_CREATOR)
     throw new StoreError(`Aynı anda en fazla ${MAX_PENDING_PER_CREATOR} bekleyen oylama açabilirsin`);
@@ -145,11 +164,13 @@ export function create(input: CreateEventInput, creatorId: string, creatorName: 
     note: clean(input.note, 400) || undefined,
     openAt,
     matchAt,
+    lockAt,
     capacity,
     createdBy: creatorName,
     creatorId,
     createdAt: now,
     joins: [],
+    log: [],
   };
   events.set(ev.id, ev);
   scheduleSave();
@@ -166,7 +187,8 @@ export function remove(id: string, clientId: string) {
 export function join(id: string, clientId: string, name: string, at: number): VoteEvent {
   const ev = mustGet(id);
   if (at < ev.openAt) throw new StoreError("Henüz açılmadı");
-  if (ev.confirmedAt) throw new StoreError("Kadro onaylandı, artık katılım kapalı");
+  if (at >= ev.lockAt) throw new StoreError(`Kayıtlar ${hhmm(ev.lockAt)}'da kapandı, artık giriş yapılamaz`);
+  // Onaydan sonra da katılım açık: kontenjan doluysa yeni gelen yedeğe yazılır.
   if (!name) throw new StoreError("İsim gerekli");
   if (ev.joins.some((j) => j.clientId === clientId)) throw new StoreError("Zaten katıldın");
   const lower = name.toLocaleLowerCase("tr");
@@ -180,10 +202,25 @@ export function join(id: string, clientId: string, name: string, at: number): Vo
 
 export function leave(id: string, clientId: string): VoteEvent {
   const ev = mustGet(id);
-  if (ev.confirmedAt) throw new StoreError("Kadro onaylandı, çıkmak için oylama sahibine yaz");
-  const before = ev.joins.length;
-  ev.joins = ev.joins.filter((j) => j.clientId !== clientId);
-  if (ev.joins.length === before) throw new StoreError("Listede değilsin");
+  // Onaydan sonra da çıkılabilir; sıralama korunduğu için ilk yedek otomatik kadroya girer.
+  const idx = ev.joins.findIndex((j) => j.clientId === clientId);
+  if (idx < 0) throw new StoreError("Listede değilsin");
+  const now = Date.now();
+  if (now >= ev.lockAt) throw new StoreError(`Kayıtlar ${hhmm(ev.lockAt)}'da kapandı, artık çıkış yapılamaz`);
+  const afterConfirm = !!ev.confirmedAt;
+  const leaving = ev.joins[idx];
+  const mainBefore = new Set(ev.joins.slice(0, ev.capacity).map((j) => j.clientId));
+  ev.joins.splice(idx, 1);
+
+  const wasMain = idx < ev.capacity;
+  ev.log.push({ type: "left", clientId, name: leaving.name, at: now, afterConfirm, pos: idx + 1, wasMain });
+  // Kadroya yeni giren (yedekten yükselen) kişileri bul ve kaydet
+  ev.joins.slice(0, ev.capacity).forEach((j, i) => {
+    if (mainBefore.has(j.clientId)) return;
+    j.promotedAt = now;
+    ev.log.push({ type: "promoted", clientId: j.clientId, name: j.name, at: now, afterConfirm, pos: i + 1, replaced: leaving.name });
+  });
+  if (ev.log.length > MAX_LOG) ev.log.splice(0, ev.log.length - MAX_LOG);
   scheduleSave();
   return toPublic(ev);
 }

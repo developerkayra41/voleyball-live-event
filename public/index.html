@@ -98,6 +98,11 @@
           </div>
         </div>
         <ol class="roster" id="ev-roster"></ol>
+
+        <details class="ev-log" id="ev-log" hidden>
+          <summary><span>Kadro hareketleri</span> <span class="muted small" id="ev-log-sum"></span></summary>
+          <ul id="ev-log-list"></ul>
+        </details>
       </div>
     </dialog>
 
@@ -118,6 +123,10 @@
         <label>Maç tarihi ve saati
           <input name="matchAt" type="datetime-local" required />
           <span class="hint muted">Maç başladığında oylama otomatik silinir.</span>
+        </label>
+        <label>Kayıtlar maçtan kaç saat önce kapansın?
+          <input name="lockHours" type="number" min="0" max="72" step="0.5" value="2" />
+          <span class="hint muted" id="lock-preview">Bu saatten sonra kimse katılamaz ve çıkamaz.</span>
         </label>
         <div class="row">
           <label class="grow">Oylama açılış zamanı

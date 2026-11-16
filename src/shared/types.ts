@@ -11,6 +11,24 @@ export interface Join {
   at: number;
   /** Aynı ms içinde gelenler için sıra */
   seq: number;
+  /** Biri çıktığı için yedekten kadroya geçtiyse zamanı */
+  promotedAt?: number;
+}
+
+/** Kadro hareketleri: kim çıktı, kim yedekten girdi */
+export interface LogEntry {
+  type: "left" | "promoted";
+  pid: string;
+  name: string;
+  at: number;
+  /** Kadro onaylandıktan sonra mı oldu */
+  afterConfirm: boolean;
+  /** left: çıkarken kaçıncı sıradaydı; promoted: kadroya girdiği sıra */
+  pos: number;
+  /** left: kadrodaydı mı (yedek değil) */
+  wasMain?: boolean;
+  /** promoted: kimin yerine girdi */
+  replaced?: string;
 }
 
 export interface VoteEvent {
@@ -21,6 +39,8 @@ export interface VoteEvent {
   openAt: number;
   /** Maç tarihi+saati (epoch ms). Bu an gelince event otomatik silinir. */
   matchAt: number;
+  /** Bu andan sonra katılma/çıkma kapalı (varsayılan maçtan 2 saat önce) */
+  lockAt: number;
   capacity: number;
   createdBy: string;
   creatorPid: string;
@@ -28,6 +48,7 @@ export interface VoteEvent {
   /** Oylama sahibi kadroyu onayladıysa zamanı */
   confirmedAt?: number;
   joins: Join[];
+  log: LogEntry[];
 }
 
 export interface EventSummary {
@@ -36,6 +57,7 @@ export interface EventSummary {
   location?: string;
   openAt: number;
   matchAt: number;
+  lockAt: number;
   capacity: number;
   createdBy: string;
   confirmedAt?: number;
@@ -49,6 +71,8 @@ export interface CreateEventInput {
   /** null => hemen aç */
   openAt: number | null;
   matchAt: number;
+  /** Kayıtlar maçtan kaç saat önce kapansın (varsayılan 2) */
+  lockHours: number;
   capacity: number;
 }
 

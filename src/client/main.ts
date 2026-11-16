@@ -154,9 +154,13 @@ function start() {
   });
   s.on("event:update", (ev) => {
     if (current?.id === ev.id) {
+      // Biri çıktığı için yedekten kadroya geçtiysem haber ver
+      const before = mySlot(current);
       current = ev;
       loaded = true;
       renderModal();
+      const after = mySlot(ev);
+      if (before === "bench" && after === "main") toast("🎉 Biri çıktı, kadroya girdin!");
     }
   });
   s.on("event:deleted", ({ id }) => {
@@ -178,22 +182,30 @@ function phase(e: { openAt: number; matchAt: number; confirmedAt?: number }): Ph
   if (now < e.openAt) return "upcoming";
   return "live";
 }
+const isLocked = (e: { lockAt: number }) => serverNow() >= e.lockAt;
+/** Faz ya da kilit durumu değişince liste yeniden çizilsin */
+const listKey = () => list.map((e) => phase(e) + (isLocked(e) ? "L" : "")).join();
+const hhmm = (ms: number) => { const d = new Date(ms); return `${pad(d.getHours())}:${pad(d.getMinutes())}`; };
 
 function cardHtml(e: EventSummary, ph: Phase) {
   const full = e.count >= e.capacity;
   const pct = Math.min(100, (e.count / e.capacity) * 100);
+  const locked = isLocked(e);
   const badge =
     ph === "upcoming"
       ? `<span class="badge cd" data-cd="${e.openAt}">${fmtCountdown(e.openAt - serverNow(), false)}</span>`
       : ph === "matches"
         ? `<span class="badge ok">✓ ONAYLANDI</span>`
-        : `<span class="badge live">CANLI</span>`;
+        : locked
+          ? `<span class="badge">🔒 KAYIT KAPALI</span>`
+          : `<span class="badge live">CANLI</span>`;
   const when =
     ph === "upcoming" ? `Açılış ${fmtWhen(e.openAt)}` : ph === "matches" ? `Maça <span data-cd="${e.matchAt}">${fmtCountdown(e.matchAt - serverNow(), false)}</span>` : "";
   return `<button class="ev-card ${ph}" data-id="${e.id}">
     <div class="ev-card-top">${badge}<span class="muted small">${ph === "upcoming" ? esc(when) : when}</span></div>
     <div class="ev-card-title">${esc(e.title)}</div>
     <div class="match-line small">🏐 Maç: <b>${esc(fmtWhen(e.matchAt))}</b></div>
+    <div class="muted small">${locked ? "🔒 Kayıtlar kapandı" : `⏱ Kayıtlar ${hhmm(e.lockAt)}'da kapanır`}</div>
     ${e.location ? `<div class="muted small">📍 ${esc(e.location)}</div>` : ""}
     <div class="bar"><span style="width:${pct}%"></span></div>
     <div class="ev-card-foot small">
@@ -216,7 +228,7 @@ function renderList() {
     $(`g-${k}`).hidden = groups[k].length === 0;
   }
   $("empty").hidden = Object.values(groups).some((g) => g.length > 0);
-  lastPhases = list.map(phase).join();
+  lastPhases = listKey();
 }
 
 document.querySelector(".container")!.addEventListener("click", (e) => {
@@ -227,7 +239,7 @@ document.querySelector(".container")!.addEventListener("click", (e) => {
 // liste geri sayımları
 setInterval(() => {
   if ($("app").hidden) return;
-  if (list.map(phase).join() !== lastPhases) return renderList();
+  if (listKey() !== lastPhases) return renderList();
   document.querySelectorAll<HTMLElement>("[data-cd]").forEach((el) => {
     el.textContent = fmtCountdown(Number(el.dataset.cd) - serverNow(), false);
   });
@@ -235,6 +247,12 @@ setInterval(() => {
 
 // ---------- event modalı ----------
 const evModal = $<HTMLDialogElement>("ev-modal");
+
+function mySlot(ev: VoteEvent): "main" | "bench" | null {
+  if (!myPid || !loaded) return null;
+  const i = ev.joins.findIndex((j) => j.pid === myPid);
+  return i < 0 ? null : i < ev.capacity ? "main" : "bench";
+}
 
 function watch(id: string) {
   socket?.emit("event:watch", { id }, (r) => {
@@ -255,8 +273,8 @@ function openEvent(id: string) {
   const sum = list.find((e) => e.id === id);
   // Tam veri gelene kadar özetle göster; liste ve buton "yükleniyor" durumunda kalır.
   current = { id, title: sum?.title ?? "", location: sum?.location, openAt: sum?.openAt ?? Infinity,
-    matchAt: sum?.matchAt ?? Infinity, confirmedAt: sum?.confirmedAt,
-    capacity: sum?.capacity ?? 12, createdBy: sum?.createdBy ?? "", creatorPid: "", createdAt: 0, joins: [] };
+    matchAt: sum?.matchAt ?? Infinity, lockAt: sum?.lockAt ?? Infinity, confirmedAt: sum?.confirmedAt,
+    capacity: sum?.capacity ?? 12, createdBy: sum?.createdBy ?? "", creatorPid: "", createdAt: 0, joins: [], log: [] };
   loaded = false;
   renderModal();
   if (!evModal.open) evModal.showModal();
@@ -298,8 +316,6 @@ function renderModal() {
   const note = $("ev-note");
   note.textContent = ev.note ?? "";
   note.hidden = !ev.note;
-  $("ev-opens").textContent = !Number.isFinite(ev.openAt) ? ""
-    : ev.confirmedAt ? "" : `Oylama açılışı: ${fmtWhen(ev.openAt)}`;
   $("ev-count").textContent = String(Math.min(ev.joins.length, ev.capacity));
   $("ev-cap").textContent = String(ev.capacity);
   $("ev-delete").hidden = !myPid || ev.creatorPid !== myPid;
@@ -320,13 +336,38 @@ function renderModal() {
         seen.add(ev.id + j.pid);
         return `${sep}<li class="r ${bench ? "bench" : "main"} ${mine ? "me" : ""} ${fresh ? "new" : ""}">
           <span class="pos">${i + 1}</span>
-          <span class="nm">${esc(j.name)}${mine ? ' <span class="you">sen</span>' : ""}${bench ? ' <span class="tag">YEDEK</span>' : ""}</span>
+          <span class="nm">${esc(j.name)}${mine ? ' <span class="you">sen</span>' : ""}${bench ? ' <span class="tag">YEDEK</span>' : ""}${!bench && j.promotedAt ? ` <span class="tag up" title="${esc(fmtClock(j.promotedAt))}">YEDEKTEN</span>` : ""}</span>
           <span class="tm"><span class="clk">${fmtClock(j.at)}</span><span class="dl">+${delta.toFixed(3)}s</span></span>
         </li>`;
       })
       .join("");
   }
+  renderLog(ev);
   tickModal();
+}
+
+function renderLog(ev: VoteEvent) {
+  const box = $("ev-log");
+  const entries = loaded ? [...ev.log].reverse() : [];
+  box.hidden = entries.length === 0;
+  const afterConfirm = entries.filter((l) => l.afterConfirm);
+  $("ev-log-sum").textContent = [
+    `${entries.filter((l) => l.type === "promoted").length} yedekten giriş`,
+    `${afterConfirm.filter((l) => l.type === "left").length} onay sonrası çıkış`,
+  ].join(" · ");
+  $("ev-log-list").innerHTML = entries
+    .map((l) => {
+      const text =
+        l.type === "promoted"
+          ? `<b>${esc(l.name)}</b> yedekten kadroya girdi <span class="muted">(#${l.pos}${l.replaced ? `, ${esc(l.replaced)} yerine` : ""})</span>`
+          : `<b>${esc(l.name)}</b> ${l.wasMain ? "kadrodan" : "yedekten"} çıktı <span class="muted">(#${l.pos})</span>`;
+      return `<li class="lg ${l.type}">
+        <span class="ic">${l.type === "promoted" ? "↑" : "✕"}</span>
+        <span class="tx">${text}${l.afterConfirm ? ' <span class="tag ac">ONAY SONRASI</span>' : ""}</span>
+        <span class="tm">${fmtClock(l.at).slice(0, 8)}</span>
+      </li>`;
+    })
+    .join("");
 }
 
 function tickModal() {
@@ -335,7 +376,10 @@ function tickModal() {
   const now = serverNow();
   const left = ev.openAt - now;
   const confirmed = loaded && !!ev.confirmedAt;
-  const open = loaded && left <= 0 && !confirmed;
+  // Kayıt kapanış saatinden sonra katıl/vazgeç kapalı (onaydan bağımsız)
+  const locked = loaded && now >= ev.lockAt;
+  const open = loaded && left <= 0 && !locked;
+  const full = ev.joins.length >= ev.capacity;
   const idx = myPid ? ev.joins.findIndex((j) => j.pid === myPid) : -1;
   const joined = idx >= 0;
   const bench = idx >= ev.capacity;
@@ -343,13 +387,20 @@ function tickModal() {
   const status = $("ev-status");
   const cd = $("ev-countdown");
 
-  setText(cd, !loaded ? "--:--:--" : confirmed ? fmtCountdown(ev.matchAt - now, false) : open ? "AÇIK" : fmtCountdown(left));
-  cd.classList.toggle("open", open);
+  setText(cd, !loaded ? "--:--:--" : confirmed || locked ? fmtCountdown(ev.matchAt - now, false) : open ? "AÇIK" : fmtCountdown(left));
+  cd.classList.toggle("open", open && !confirmed);
   cd.classList.toggle("ok", confirmed);
-  cd.classList.toggle("soon", loaded && !open && !confirmed && left < 10_000);
+  cd.classList.toggle("soon", loaded && left > 0 && left < 10_000);
   // innerHTML her karede yazılırsa canlı noktanın animasyonu sürekli sıfırlanır
-  setHTML(status, confirmed ? "✓ Kadro onaylandı · maça kalan" : open ? `<span class="live-dot"></span> CANLI` : "Açılmayı bekliyor");
-  status.classList.toggle("on", open);
+  setHTML(status,
+    confirmed ? (locked ? "✓ Kadro onaylandı · 🔒 kayıtlar kapalı · maça kalan" : "✓ Kadro onaylandı · maça kalan")
+    : locked ? "🔒 Kayıtlar kapandı · maça kalan"
+    : open ? `<span class="live-dot"></span> CANLI` : "Açılmayı bekliyor");
+  setText($("ev-opens"), !loaded ? ""
+    : left > 0 ? `Oylama açılışı: ${fmtWhen(ev.openAt)} · kayıtlar ${hhmm(ev.lockAt)}'da kapanır`
+    : locked ? `Kayıtlar ${hhmm(ev.lockAt)}'da kapandı · Maç ${hhmm(ev.matchAt)}`
+    : `Kayıtların kapanmasına ${fmtCountdown(ev.lockAt - now, false)} (${hhmm(ev.lockAt)})`);
+  status.classList.toggle("on", open && !confirmed);
   status.classList.toggle("ok", confirmed);
 
   btn.classList.toggle("ready", open && !joined);
@@ -358,18 +409,26 @@ function tickModal() {
   btn.disabled = !open || joinPending || !myPid;
   const label = btn.querySelector<HTMLElement>(".label")!;
   const lock = btn.querySelector<HTMLElement>(".lock")!;
-  lock.hidden = open || confirmed;
+  lock.hidden = open;
   const hint = $("ev-hint");
-  if (confirmed) {
-    setText(label, "KADRO KESİNLEŞTİ");
-    setHTML(hint, !joined ? "Bu maçın kadrosunda değilsin"
-      : bench ? `Yedeksin: <b>#${idx + 1}</b>` : `Sahadasın! <b class="okc">#${idx + 1}</b>`);
+  const reserveNo = idx - ev.capacity + 1;
+  if (locked) {
+    setText(label, "KAYITLAR KAPANDI");
+    setHTML(hint, !joined ? "Giriş çıkış kapalı. Bu maça artık katılamazsın."
+      : bench ? `Yedektesin: <b>${reserveNo}. sıra</b>. Giriş çıkış kapandı.`
+      : `Kadrodasın: <b class="${confirmed ? "okc" : "neon"}">#${idx + 1}</b>. Giriş çıkış kapandı.`);
   } else if (joined) {
     setText(label, "VAZGEÇ");
-    setHTML(hint, `Sıran: <b class="${bench ? "" : "neon"}">#${idx + 1}</b>${bench ? " (yedek)" : ""} · ${fmtClock(ev.joins[idx].at)}`);
+    setHTML(hint, bench
+      ? `Yedeksin: <b>${reserveNo}. sıradasın</b>. Kadrodan biri çıkarsa otomatik girersin.`
+      : confirmed ? `Sahadasın! <b class="okc">#${idx + 1}</b>`
+      : `Sıran: <b class="neon">#${idx + 1}</b> · ${fmtClock(ev.joins[idx].at)}`);
   } else {
-    setText(label, "KATIL");
-    setHTML(hint, open ? "Hemen bas!" : "Saat gelince buton açılacak");
+    setText(label, open && full ? "YEDEĞE YAZIL" : "KATIL");
+    setHTML(hint, !open ? "Saat gelince buton açılacak"
+      : full ? "Kadro dolu. Yedeğe yazılırsan biri çıktığında sırayla kadroya girersin."
+      : confirmed ? `Kadroda ${ev.capacity - ev.joins.length} boş yer var!`
+      : "Hemen bas!");
   }
 
   // Oylama sahibine onay kutusu (oylama açıldıktan sonra)
@@ -382,7 +441,9 @@ function tickModal() {
     cBtn.classList.toggle("undo", confirmed);
     setText(cBtn, confirmed ? "Onayı geri al" : "✓ Kadroyu Onayla");
     cBtn.disabled = confirmPending || (!confirmed && missing > 0);
-    setText($("ev-owner-text"), confirmed ? "Kadroyu onayladın. Geri alırsan katılım tekrar açılır."
+    setText($("ev-owner-text"), confirmed
+      ? missing > 0 ? `Kadroyu onayladın ama şu an ${missing} kişi eksik (${ev.joins.length}/${ev.capacity}).`
+        : "Kadroyu onayladın. Çıkan olursa yedekler sırayla kadroya girer."
       : missing > 0 ? `Onaylamak için ${missing} kişi daha gerekli (${ev.joins.length}/${ev.capacity})`
       : `Kontenjan doldu (${ev.joins.length}/${ev.capacity}). Kadroyu onaylayabilirsin.`);
   }
@@ -393,7 +454,7 @@ $("ev-confirm").addEventListener("click", () => {
   const ev = current;
   if (!ev || !socket || confirmPending) return;
   const confirmed = !ev.confirmedAt;
-  if (!confirmed && !confirm("Onayı geri almak istediğine emin misin? Katılım tekrar açılır.")) return;
+  if (!confirmed && !confirm("Onayı geri almak istediğine emin misin? Maç 'Oynanacak Maçlar'dan çıkar.")) return;
   confirmPending = true;
   socket.emit("event:confirm", { id: ev.id, confirmed }, (r) => {
     confirmPending = false;
@@ -409,8 +470,13 @@ $("ev-confirm").addEventListener("click", () => {
 $("ev-join").addEventListener("click", () => {
   const ev = current;
   if (!ev || !socket || joinPending || !loaded || !myPid) return;
-  const joined = ev.joins.some((j) => j.pid === myPid);
-  if (joined && !confirm("Listeden çıkmak istediğine emin misin? Tekrar katılırsan sona eklenirsin.")) return;
+  const slot = mySlot(ev);
+  const joined = slot !== null;
+  const hasReserve = ev.joins.length > ev.capacity;
+  const msg = slot === "main" && hasReserve
+    ? `Kadrodan çıkmak istediğine emin misin? Yerine ilk yedek (${ev.joins[ev.capacity].name}) girecek. Tekrar katılırsan sona eklenirsin.`
+    : "Listeden çıkmak istediğine emin misin? Tekrar katılırsan sona eklenirsin.";
+  if (joined && !confirm(msg)) return;
   joinPending = true;
   const done = () => { joinPending = false; };
   if (joined) {
@@ -469,6 +535,7 @@ $("new-event").addEventListener("click", () => {
   m.setDate(m.getDate() + 1);
   m.setHours(21, 30, 0, 0);
   (newForm.elements.namedItem("matchAt") as HTMLInputElement).value = toLocalInput(m.getTime()).slice(0, 16);
+  updateLockPreview();
   newModal.showModal();
 });
 
@@ -476,6 +543,20 @@ const nowBox = newForm.elements.namedItem("now") as HTMLInputElement;
 nowBox.addEventListener("change", () => {
   (newForm.elements.namedItem("openAt") as HTMLInputElement).disabled = nowBox.checked;
 });
+
+/** Formda "kayıtlar şu saatte kapanacak" önizlemesi */
+function lockHoursValue() {
+  const v = Number((newForm.elements.namedItem("lockHours") as HTMLInputElement).value);
+  return Number.isFinite(v) && v >= 0 ? v : 2;
+}
+function updateLockPreview() {
+  const raw = (newForm.elements.namedItem("matchAt") as HTMLInputElement).value;
+  const matchAt = raw ? new Date(raw).getTime() : NaN;
+  $("lock-preview").textContent = Number.isFinite(matchAt)
+    ? `Kayıtlar ${fmtWhen(matchAt - lockHoursValue() * 3_600_000)}'da kapanır. Sonra kimse katılamaz ve çıkamaz.`
+    : "Bu saatten sonra kimse katılamaz ve çıkamaz.";
+}
+newForm.addEventListener("input", updateLockPreview);
 
 newForm.addEventListener("submit", (e) => {
   e.preventDefault();
@@ -497,6 +578,11 @@ newForm.addEventListener("submit", (e) => {
     $("new-err").textContent = "Maç, oylama açıldıktan sonra olmalı";
     return;
   }
+  const lockHours = lockHoursValue();
+  if (matchAt - lockHours * 3_600_000 <= (openAt ?? Date.now())) {
+    $("new-err").textContent = "Kayıtlar oylama açılmadan kapanmış olur; kapanış süresini kısalt";
+    return;
+  }
   socket?.emit(
     "event:create",
     {
@@ -505,6 +591,7 @@ newForm.addEventListener("submit", (e) => {
       note: String(f.get("note") ?? ""),
       openAt,
       matchAt,
+      lockHours,
       capacity: Number(f.get("capacity") ?? 12),
     },
     (r) => {
