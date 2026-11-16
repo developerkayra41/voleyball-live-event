@@ -269,3 +269,21 @@ label.check input { width: 18px; height: 18px; accent-color: var(--neon); }
 .lg.promoted .ic { color: var(--ok); }
 .lg.left .ic { color: #ff6b6b; }
 .lg .tm { font-family: var(--mono); font-size: 11px; color: var(--muted); }
+
+/* ---------- admin modu ---------- */
+.admin-bar {
+  display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 8px 16px;
+  padding: 10px 20px; font-size: 13px; background: rgba(255, 184, 107, .08);
+  border-bottom: 1px solid rgba(255, 184, 107, .3); color: #ffd3a3;
+}
+.admin-actions { display: flex; gap: 16px; }
+@media (max-width: 520px) { .admin-bar { padding: 10px 16px; } }
+@media (max-width: 420px) { .me > .muted { display: none; } .me b { max-width: 90px; } }
+
+/* ---------- kayıtları kapanan (onay bekleyen) ---------- */
+.group h3 .h-sub { text-transform: none; letter-spacing: 0; font-weight: 500; }
+.ev-card.closed { background: var(--surface); border-color: var(--border-2); }
+.ev-card.closed .ev-card-title { color: #c9c9d1; }
+.ev-card.closed .bar span { background: #6b6b75; box-shadow: none; }
+.ev-card.closed .neon { color: var(--text); }
+.ev-card.closed:hover { border-color: #8b8b95; box-shadow: none; }

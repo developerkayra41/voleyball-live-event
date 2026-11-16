@@ -45,8 +45,10 @@ export interface VoteEvent {
   createdBy: string;
   creatorPid: string;
   createdAt: number;
-  /** Oylama sahibi kadroyu onayladıysa zamanı */
+  /** Kadro onaylandıysa zamanı (sahip onayı ya da kayıt kapanışında otomatik) */
   confirmedAt?: number;
+  /** Kayıt saati geldiği için otomatik onaylandıysa true */
+  autoConfirmed?: boolean;
   joins: Join[];
   log: LogEntry[];
 }
@@ -87,11 +89,13 @@ export interface ClientToServer {
   "event:join": (p: { id: string }, cb: Ack<{ at: number }>) => void;
   "event:leave": (p: { id: string }, cb: Ack) => void;
   "event:confirm": (p: { id: string; confirmed: boolean }, cb: Ack) => void;
+  /** Sadece admin: tüm oylamaları siler */
+  "admin:deleteAll": (cb: Ack<{ count: number }>) => void;
 }
 
 export interface ServerToClient {
   /** Bağlanınca kişinin kendi public id'si */
-  me: (p: { pid: string }) => void;
+  me: (p: { pid: string; admin: boolean; adminRejected: boolean }) => void;
   "events:list": (list: EventSummary[]) => void;
   "event:update": (ev: VoteEvent) => void;
   "event:deleted": (p: { id: string }) => void;
@@ -100,4 +104,13 @@ export interface ServerToClient {
 export interface SocketAuth {
   clientId: string;
   name: string;
+  /** ?admin=... ile girilen anahtar (sunucuda ADMIN_KEY ile karşılaştırılır) */
+  adminKey?: string;
+}
+
+export interface SocketData {
+  clientId: string;
+  name: string;
+  isAdmin: boolean;
+  adminRejected: boolean;
 }

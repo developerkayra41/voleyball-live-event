@@ -23,7 +23,7 @@
         <div class="brand big"><span class="dot"></span> voleybol<span class="accent">_</span></div>
         <h1>Adın ne?</h1>
         <p class="muted">Sadece isim yeterli. Listede bu isimle görüneceksin.</p>
-        <input id="login-name" maxlength="32" autocomplete="name" placeholder="Örn. Furkan" required />
+        <input id="login-name" maxlength="32" autocomplete="name" placeholder="Örn. Ahmet" required />
         <button class="btn primary block" type="submit">Devam et</button>
       </form>
     </section>
@@ -38,6 +38,14 @@
           <button class="link" id="change-name">değiştir</button>
         </div>
       </header>
+
+      <div class="admin-bar" id="admin-bar" hidden>
+        <span>🛡 <b>Admin modu</b> <span class="muted">· her oylamayı silebilirsin</span></span>
+        <span class="admin-actions">
+          <button class="link danger" id="admin-delete-all">Tüm oylamaları sil</button>
+          <button class="link" id="admin-exit">Admin modundan çık</button>
+        </span>
+      </div>
 
       <main class="container">
         <section class="hero">
@@ -58,8 +66,7 @@
         <section class="group" id="g-upcoming" hidden>
           <h3>Yaklaşan</h3>
           <div class="cards" id="list-upcoming"></div>
-        </section>
-        <p class="empty muted" id="empty" hidden>Henüz oylama yok. İlkini sen oluştur 👆</p>
+        </section>        <p class="empty muted" id="empty" hidden>Henüz oylama yok. İlkini sen oluştur 👆</p>
       </main>
     </div>
 

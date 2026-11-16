@@ -11,6 +11,9 @@ services:
     envVars:
       - key: NODE_VERSION
         value: "22"
+      # /admin.html yedekleme sayfasının şifresi (en az 8 karakter). Değeri panelden girilir.
+      - key: ADMIN_KEY
+        sync: false
 
     # --- Kalıcı veri (ücretli plan) ---
     # Ücretsiz planda disk silinir: servis uyursa ya da yeniden deploy edilirse

@@ -23,6 +23,25 @@ if (!clientId) {
 }
 let myName = storageGet(LS_NAME) ?? "";
 
+// ---------- admin modu ----------
+// Ana sayfaya ?admin=ANAHTAR ile girilirse anahtar bu cihazda saklanır ve URL'den silinir.
+// Anahtarın doğru olup olmadığına sunucu karar verir (bağlanınca "me" ile bildirir).
+const LS_ADMIN = "vb.adminKey";
+{
+  const url = new URL(location.href);
+  const key = url.searchParams.get("admin");
+  if (key) {
+    storageSet(LS_ADMIN, key);
+    url.searchParams.delete("admin");
+    history.replaceState(null, "", url);
+  }
+}
+let adminKey = storageGet(LS_ADMIN) ?? "";
+let isAdmin = false;
+function storageDel(k: string) {
+  try { localStorage.removeItem(k); } catch { /* yoksay */ }
+}
+
 // ---------- saat senkronu ----------
 let offset = 0; // serverNow - localNow
 const serverNow = () => Date.now() + offset;
@@ -130,7 +149,7 @@ function start() {
   $("app").hidden = false;
   $("me-name").textContent = myName;
   socket?.disconnect();
-  const s: S = io({ auth: { clientId, name: myName } });
+  const s: S = io({ auth: { clientId, name: myName, ...(adminKey ? { adminKey } : {}) } });
   socket = s;
 
   s.on("connect", async () => {
@@ -138,8 +157,16 @@ function start() {
     await syncClock(s);
     if (current) watch(current.id);
   });
-  s.on("me", ({ pid }) => {
+  s.on("me", ({ pid, admin, adminRejected }) => {
     myPid = pid;
+    isAdmin = admin;
+    if (adminRejected) {
+      // Yanlış anahtar: cihazdan sil ki her girişte denemesin
+      adminKey = "";
+      storageDel(LS_ADMIN);
+      toast("Admin anahtarı yanlış", "err");
+    }
+    $("admin-bar").hidden = !isAdmin;
     if (current) renderModal();
   });
   s.on("disconnect", () => $("conn").classList.remove("on"));
@@ -175,10 +202,11 @@ setInterval(() => socket?.connected && syncClock(socket, 3), 30_000);
 
 // ---------- ana liste ----------
 type Phase = "matches" | "live" | "upcoming" | "gone";
-function phase(e: { openAt: number; matchAt: number; confirmedAt?: number }): Phase {
+function phase(e: { openAt: number; matchAt: number; lockAt: number; confirmedAt?: number }): Phase {
   const now = serverNow();
   if (now >= e.matchAt) return "gone"; // maç başladı, sunucu da birkaç sn içinde siler
-  if (e.confirmedAt) return "matches";
+  // Kayıt saati gelince kadro otomatik kesinleşir (sunucu da 1 sn içinde onaylar)
+  if (e.confirmedAt || now >= e.lockAt) return "matches";
   if (now < e.openAt) return "upcoming";
   return "live";
 }
@@ -196,13 +224,11 @@ function cardHtml(e: EventSummary, ph: Phase) {
       ? `<span class="badge cd" data-cd="${e.openAt}">${fmtCountdown(e.openAt - serverNow(), false)}</span>`
       : ph === "matches"
         ? `<span class="badge ok">✓ ONAYLANDI</span>`
-        : locked
-          ? `<span class="badge">🔒 KAYIT KAPALI</span>`
-          : `<span class="badge live">CANLI</span>`;
-  const when =
-    ph === "upcoming" ? `Açılış ${fmtWhen(e.openAt)}` : ph === "matches" ? `Maça <span data-cd="${e.matchAt}">${fmtCountdown(e.matchAt - serverNow(), false)}</span>` : "";
+        : `<span class="badge live">CANLI</span>`;
+  const matchCd = `Maça <span data-cd="${e.matchAt}">${fmtCountdown(e.matchAt - serverNow(), false)}</span>`;
+  const when = ph === "upcoming" ? esc(`Açılış ${fmtWhen(e.openAt)}`) : ph === "matches" ? matchCd : "";
   return `<button class="ev-card ${ph}" data-id="${e.id}">
-    <div class="ev-card-top">${badge}<span class="muted small">${ph === "upcoming" ? esc(when) : when}</span></div>
+    <div class="ev-card-top">${badge}<span class="muted small">${when}</span></div>
     <div class="ev-card-title">${esc(e.title)}</div>
     <div class="match-line small">🏐 Maç: <b>${esc(fmtWhen(e.matchAt))}</b></div>
     <div class="muted small">${locked ? "🔒 Kayıtlar kapandı" : `⏱ Kayıtlar ${hhmm(e.lockAt)}'da kapanır`}</div>
@@ -318,7 +344,8 @@ function renderModal() {
   note.hidden = !ev.note;
   $("ev-count").textContent = String(Math.min(ev.joins.length, ev.capacity));
   $("ev-cap").textContent = String(ev.capacity);
-  $("ev-delete").hidden = !myPid || ev.creatorPid !== myPid;
+  // Sil: oylama sahibi ya da admin görür
+  $("ev-delete").hidden = !loaded || !myPid || (ev.creatorPid !== myPid && !isAdmin);
 
   const roster = $("ev-roster");
   if (!loaded) {
@@ -375,9 +402,9 @@ function tickModal() {
   if (!ev || !evModal.open) return;
   const now = serverNow();
   const left = ev.openAt - now;
-  const confirmed = loaded && !!ev.confirmedAt;
-  // Kayıt kapanış saatinden sonra katıl/vazgeç kapalı (onaydan bağımsız)
+  // Kayıt kapanış saatinden sonra katıl/vazgeç kapalı ve kadro otomatik kesinleşir
   const locked = loaded && now >= ev.lockAt;
+  const confirmed = loaded && (!!ev.confirmedAt || locked);
   const open = loaded && left <= 0 && !locked;
   const full = ev.joins.length >= ev.capacity;
   const idx = myPid ? ev.joins.findIndex((j) => j.pid === myPid) : -1;
@@ -393,13 +420,13 @@ function tickModal() {
   cd.classList.toggle("soon", loaded && left > 0 && left < 10_000);
   // innerHTML her karede yazılırsa canlı noktanın animasyonu sürekli sıfırlanır
   setHTML(status,
-    confirmed ? (locked ? "✓ Kadro onaylandı · 🔒 kayıtlar kapalı · maça kalan" : "✓ Kadro onaylandı · maça kalan")
-    : locked ? "🔒 Kayıtlar kapandı · maça kalan"
+    locked ? "✓ Kadro kesinleşti · maça kalan"
+    : confirmed ? "✓ Kadro onaylandı · maça kalan"
     : open ? `<span class="live-dot"></span> CANLI` : "Açılmayı bekliyor");
   setText($("ev-opens"), !loaded ? ""
     : left > 0 ? `Oylama açılışı: ${fmtWhen(ev.openAt)} · kayıtlar ${hhmm(ev.lockAt)}'da kapanır`
-    : locked ? `Kayıtlar ${hhmm(ev.lockAt)}'da kapandı · Maç ${hhmm(ev.matchAt)}`
-    : `Kayıtların kapanmasına ${fmtCountdown(ev.lockAt - now, false)} (${hhmm(ev.lockAt)})`);
+    : locked ? `Kayıtlar ${hhmm(ev.lockAt)}'da kapandı, kadro otomatik onaylandı · Maç ${hhmm(ev.matchAt)}`
+    : `Kayıtların kapanmasına ${fmtCountdown(ev.lockAt - now, false)} (${hhmm(ev.lockAt)}) · sonra kadro otomatik onaylanır`);
   status.classList.toggle("on", open && !confirmed);
   status.classList.toggle("ok", confirmed);
 
@@ -416,7 +443,7 @@ function tickModal() {
     setText(label, "KAYITLAR KAPANDI");
     setHTML(hint, !joined ? "Giriş çıkış kapalı. Bu maça artık katılamazsın."
       : bench ? `Yedektesin: <b>${reserveNo}. sıra</b>. Giriş çıkış kapandı.`
-      : `Kadrodasın: <b class="${confirmed ? "okc" : "neon"}">#${idx + 1}</b>. Giriş çıkış kapandı.`);
+      : `Sahadasın! <b class="okc">#${idx + 1}</b>. Giriş çıkış kapandı.`);
   } else if (joined) {
     setText(label, "VAZGEÇ");
     setHTML(hint, bench
@@ -435,8 +462,13 @@ function tickModal() {
   const isOwner = loaded && !!myPid && ev.creatorPid === myPid;
   const ownerBox = $("ev-owner");
   ownerBox.hidden = !isOwner || left > 0;
-  if (!ownerBox.hidden) {
-    const cBtn = $<HTMLButtonElement>("ev-confirm");
+  const cBtn = $<HTMLButtonElement>("ev-confirm");
+  cBtn.hidden = locked; // kayıtlar kapandıysa onay kesin, geri alınamaz
+  if (!ownerBox.hidden && locked) {
+    const missing = ev.capacity - ev.joins.length;
+    setText($("ev-owner-text"), `Kayıtlar kapandı, kadro otomatik onaylandı (${ev.joins.length}/${ev.capacity})`
+      + (missing > 0 ? `. ${missing} kişi eksik.` : "."));
+  } else if (!ownerBox.hidden) {
     const missing = ev.capacity - ev.joins.length;
     cBtn.classList.toggle("undo", confirmed);
     setText(cBtn, confirmed ? "Onayı geri al" : "✓ Kadroyu Onayla");
@@ -444,7 +476,7 @@ function tickModal() {
     setText($("ev-owner-text"), confirmed
       ? missing > 0 ? `Kadroyu onayladın ama şu an ${missing} kişi eksik (${ev.joins.length}/${ev.capacity}).`
         : "Kadroyu onayladın. Çıkan olursa yedekler sırayla kadroya girer."
-      : missing > 0 ? `Onaylamak için ${missing} kişi daha gerekli (${ev.joins.length}/${ev.capacity})`
+      : missing > 0 ? `Onaylamak için ${missing} kişi daha gerekli (${ev.joins.length}/${ev.capacity}). Kayıtlar ${hhmm(ev.lockAt)}'da kapanınca otomatik onaylanır.`
       : `Kontenjan doldu (${ev.joins.length}/${ev.capacity}). Kadroyu onaylayabilirsin.`);
   }
 }
@@ -505,10 +537,35 @@ $("ev-share").addEventListener("click", async () => {
 });
 
 $("ev-delete").addEventListener("click", () => {
-  if (!current || !confirm("Bu oylamayı silmek istediğine emin misin?")) return;
+  if (!current) return;
+  const notMine = current.creatorPid !== myPid;
+  const msg = notMine
+    ? `Admin olarak "${current.title}" oylamasını silmek istediğine emin misin? (Oluşturan: ${current.createdBy})`
+    : "Bu oylamayı silmek istediğine emin misin?";
+  if (!confirm(msg)) return;
   socket?.emit("event:delete", { id: current.id }, (r) => {
     if (r.ok) { closeEvent(); toast("Silindi"); } else toast(r.error, "err");
   });
+});
+
+$("admin-delete-all").addEventListener("click", () => {
+  if (!isAdmin || !socket) return;
+  const n = list.length;
+  if (!n) return toast("Silinecek oylama yok");
+  if (!confirm(`${n} oylamanın HEPSİ silinecek (onaylı maçlar dahil). Geri alınamaz. Emin misin?`)) return;
+  socket.emit("admin:deleteAll", (r) => {
+    if (r.ok) toast(`${r.data!.count} oylama silindi`);
+    else toast(r.error, "err");
+  });
+});
+
+$("admin-exit").addEventListener("click", () => {
+  adminKey = "";
+  storageDel(LS_ADMIN);
+  isAdmin = false;
+  $("admin-bar").hidden = true;
+  start(); // anahtarsız yeniden bağlan
+  toast("Admin modundan çıkıldı");
 });
 
 // ---------- oluşturma modalı ----------

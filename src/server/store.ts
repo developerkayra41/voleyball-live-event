@@ -34,6 +34,7 @@ interface StoredEvent {
   creatorId: string;
   createdAt: number;
   confirmedAt?: number;
+  autoConfirmed?: boolean;
   joins: StoredJoin[];
   log: StoredLog[];
 }
@@ -87,22 +88,101 @@ export function saveNow() {
     console.error("snapshot yazılamadı:", e);
   }
 }
+const isStr = (v: unknown): v is string => typeof v === "string" && v.length > 0;
+const isNum = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v);
+
+/** Dosyadan ya da içe aktarmadan gelen bir eventi doğrular ve eksik alanları tamamlar. */
+function normalize(raw: unknown): StoredEvent | null {
+  const ev = raw as Partial<StoredEvent> | null;
+  if (!ev || !isStr(ev.id) || !isStr(ev.title) || !isNum(ev.openAt) || !isStr(ev.creatorId)) return null;
+  // Maç tarihi eklenmeden önce oluşturulmuş eventler: açılıştan 1 gün sonrası say
+  const matchAt = isNum(ev.matchAt) ? ev.matchAt : ev.openAt + DAY;
+  const joins = (Array.isArray(ev.joins) ? ev.joins : []).filter(
+    (j): j is StoredJoin => !!j && isStr(j.clientId) && isStr(j.name) && isNum(j.at) && isNum(j.seq),
+  );
+  const log = (Array.isArray(ev.log) ? ev.log : []).filter(
+    (l): l is StoredLog => !!l && isStr(l.clientId) && isStr(l.name) && isNum(l.at) && (l.type === "left" || l.type === "promoted"),
+  );
+  return {
+    id: ev.id,
+    title: ev.title,
+    location: typeof ev.location === "string" ? ev.location : undefined,
+    note: typeof ev.note === "string" ? ev.note : undefined,
+    openAt: ev.openAt,
+    matchAt,
+    lockAt: isNum(ev.lockAt) ? ev.lockAt : Math.max(ev.openAt, matchAt - DEFAULT_LOCK_HOURS * HOUR),
+    capacity: isNum(ev.capacity) ? Math.min(100, Math.max(1, Math.floor(ev.capacity))) : 12,
+    createdBy: typeof ev.createdBy === "string" ? ev.createdBy : "",
+    creatorId: ev.creatorId,
+    createdAt: isNum(ev.createdAt) ? ev.createdAt : ev.openAt,
+    confirmedAt: isNum(ev.confirmedAt) ? ev.confirmedAt : undefined,
+    autoConfirmed: ev.autoConfirmed === true ? true : undefined,
+    joins: joins.sort((a, b) => a.at - b.at || a.seq - b.seq),
+    log,
+  };
+}
+
 export function load() {
   if (!existsSync(DATA_FILE)) return;
   try {
-    const raw = JSON.parse(readFileSync(DATA_FILE, "utf8")) as { seqCounter: number; events: StoredEvent[] };
-    seqCounter = raw.seqCounter ?? 0;
-    for (const ev of raw.events ?? []) {
-      // Maç tarihi eklenmeden önce oluşturulmuş eventler: açılıştan 1 gün sonrası say
-      if (!Number.isFinite(ev.matchAt)) ev.matchAt = ev.openAt + DAY;
-      ev.log ??= [];
-      if (!Number.isFinite(ev.lockAt)) ev.lockAt = Math.max(ev.openAt, ev.matchAt - DEFAULT_LOCK_HOURS * HOUR);
-      events.set(ev.id, ev);
+    const raw = JSON.parse(readFileSync(DATA_FILE, "utf8")) as { seqCounter?: number; events?: unknown[] };
+    seqCounter = isNum(raw.seqCounter) ? raw.seqCounter : 0;
+    for (const item of raw.events ?? []) {
+      const ev = normalize(item);
+      if (ev) events.set(ev.id, ev);
     }
     console.log(`${events.size} event yüklendi (${DATA_FILE})`);
   } catch (e) {
     console.error("snapshot okunamadı:", e);
   }
+}
+
+// ---------- yedekleme: dışa / içe aktarma ----------
+export interface Backup {
+  app: "voleybol-kadro";
+  version: 1;
+  exportedAt: string;
+  seqCounter: number;
+  events: StoredEvent[];
+}
+
+/** Tüm veriyi (gerçek kimlik anahtarlarıyla birlikte) yedek olarak döner. */
+export function exportData(): Backup {
+  return {
+    app: "voleybol-kadro",
+    version: 1,
+    exportedAt: new Date().toISOString(),
+    seqCounter,
+    events: [...events.values()],
+  };
+}
+
+/**
+ * Yedeği geri yükler. Mevcut tüm eventler yedektekilerle DEĞİŞTİRİLİR.
+ * Maç saati geçmiş eventler alınmaz. Etkilenen (eklenen/silinen) id'leri döner.
+ */
+export function importData(raw: unknown): { imported: number; skipped: number; removed: string[]; ids: string[] } {
+  const data = raw as Partial<Backup> | null;
+  if (!data || !Array.isArray(data.events)) throw new StoreError("Geçersiz yedek dosyası: 'events' listesi yok");
+  const now = Date.now();
+  const next = new Map<string, StoredEvent>();
+  let skipped = 0;
+  for (const item of data.events) {
+    const ev = normalize(item);
+    if (!ev || now >= ev.matchAt) {
+      skipped++;
+      continue;
+    }
+    next.set(ev.id, ev);
+  }
+  const removed = [...events.keys()].filter((id) => !next.has(id));
+  events.clear();
+  for (const [id, ev] of next) events.set(id, ev);
+  // Yeni katılımlar yedektekilerden sonra sıralansın
+  const maxSeq = Math.max(0, ...[...next.values()].flatMap((e) => e.joins.map((j) => j.seq)));
+  seqCounter = Math.max(seqCounter, isNum(data.seqCounter) ? data.seqCounter : 0, maxSeq);
+  scheduleSave();
+  return { imported: next.size, skipped, removed, ids: [...next.keys()] };
 }
 
 // ---------- queries ----------
@@ -177,11 +257,19 @@ export function create(input: CreateEventInput, creatorId: string, creatorName: 
   return toPublic(ev);
 }
 
-export function remove(id: string, clientId: string) {
+export function remove(id: string, clientId: string, asAdmin = false) {
   const ev = mustGet(id);
-  if (ev.creatorId !== clientId) throw new StoreError("Sadece oluşturan kişi silebilir");
+  if (!asAdmin && ev.creatorId !== clientId) throw new StoreError("Sadece oluşturan kişi silebilir");
   events.delete(id);
   scheduleSave();
+}
+
+/** Tüm oylamaları siler (sadece admin çağırır); silinen id'leri döner */
+export function removeAll(): string[] {
+  const ids = [...events.keys()];
+  events.clear();
+  scheduleSave();
+  return ids;
 }
 
 export function join(id: string, clientId: string, name: string, at: number): VoteEvent {
@@ -229,15 +317,36 @@ export function leave(id: string, clientId: string): VoteEvent {
 export function setConfirmed(id: string, clientId: string, confirmed: boolean): VoteEvent {
   const ev = mustGet(id);
   if (ev.creatorId !== clientId) throw new StoreError("Sadece oylama sahibi onaylayabilir");
+  if (Date.now() >= ev.lockAt) throw new StoreError("Kayıtlar kapandığı için kadro otomatik kesinleşti, değiştirilemez");
   if (confirmed) {
     if (ev.joins.length < ev.capacity)
       throw new StoreError(`Kontenjan dolmadan onaylanamaz (${ev.joins.length}/${ev.capacity})`);
     ev.confirmedAt = Date.now();
+    ev.autoConfirmed = false;
   } else {
     delete ev.confirmedAt;
+    delete ev.autoConfirmed;
   }
   scheduleSave();
   return toPublic(ev);
+}
+
+/**
+ * Kayıt saati gelmiş ama onaylanmamış oylamaları otomatik onaylar.
+ * Kontenjan dolmasa bile o anki kadro kesinleşir. Onaylanan id'leri döner.
+ */
+export function autoConfirm(): string[] {
+  const now = Date.now();
+  const done: string[] = [];
+  for (const [id, ev] of events) {
+    if (!ev.confirmedAt && now >= ev.lockAt && now < ev.matchAt) {
+      ev.confirmedAt = ev.lockAt;
+      ev.autoConfirmed = true;
+      done.push(id);
+    }
+  }
+  if (done.length) scheduleSave();
+  return done;
 }
 
 /** Maç saati gelmiş eventleri siler; silinen id'leri döner */
