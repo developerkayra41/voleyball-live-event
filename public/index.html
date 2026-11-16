@@ -1,0 +1,139 @@
+<!doctype html>
+<html lang="tr">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="theme-color" content="#0d0d10" />
+    <title>Voleybol Kadro</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@500;700&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="style.css" />
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🏐</text></svg>" />
+  </head>
+  <body>
+    <div class="bg-glow" aria-hidden="true"></div>
+
+    <!-- Giriş -->
+    <section id="login" class="login" hidden>
+      <form id="login-form" class="card login-card">
+        <div class="brand big"><span class="dot"></span> voleybol<span class="accent">_</span></div>
+        <h1>Adın ne?</h1>
+        <p class="muted">Sadece isim yeterli. Listede bu isimle görüneceksin.</p>
+        <input id="login-name" maxlength="32" autocomplete="name" placeholder="Örn. Furkan" required />
+        <button class="btn primary block" type="submit">Devam et</button>
+      </form>
+    </section>
+
+    <!-- Uygulama -->
+    <div id="app" hidden>
+      <header class="topbar">
+        <div class="brand"><span class="dot"></span> voleybol<span class="accent">_</span></div>
+        <div class="me">
+          <span class="conn" id="conn" title="Bağlantı"></span>
+          <span class="muted">Merhaba,</span> <b id="me-name"></b>
+          <button class="link" id="change-name">değiştir</button>
+        </div>
+      </header>
+
+      <main class="container">
+        <section class="hero">
+          <div class="pill">🏐 Kadro oylaması</div>
+          <h2>Saat gelince <span class="neon">bas</span>,<br />ilk 12 sahaya çıksın.</h2>
+          <p class="muted">Herkesin basış anı sunucu saatine göre milisaniyesiyle kaydedilir.</p>
+          <button class="btn primary" id="new-event">+ Yeni Oylama</button>
+        </section>
+
+        <section class="group" id="g-matches" hidden>
+          <h3 class="ok">✓ Oynanacak Maçlar</h3>
+          <div class="cards" id="list-matches"></div>
+        </section>
+        <section class="group" id="g-live" hidden>
+          <h3><span class="live-dot"></span> Açık</h3>
+          <div class="cards" id="list-live"></div>
+        </section>
+        <section class="group" id="g-upcoming" hidden>
+          <h3>Yaklaşan</h3>
+          <div class="cards" id="list-upcoming"></div>
+        </section>
+        <p class="empty muted" id="empty" hidden>Henüz oylama yok. İlkini sen oluştur 👆</p>
+      </main>
+    </div>
+
+    <!-- Event modalı -->
+    <dialog id="ev-modal" class="modal">
+      <div class="modal-inner">
+        <button class="x" data-close aria-label="Kapat">✕</button>
+        <div class="ev-head">
+          <div class="ev-status" id="ev-status"></div>
+          <h2 id="ev-title"></h2>
+          <div class="ev-match" id="ev-match"></div>
+          <div class="ev-meta muted" id="ev-meta"></div>
+          <p class="ev-note" id="ev-note"></p>
+        </div>
+
+        <div class="countdown-wrap">
+          <div class="countdown" id="ev-countdown">--:--:--</div>
+          <div class="muted small" id="ev-opens"></div>
+        </div>
+
+        <button class="join-btn" id="ev-join" disabled>
+          <span class="lock">🔒</span> <span class="label">KATIL</span>
+        </button>
+        <div class="join-hint muted small" id="ev-hint"></div>
+
+        <div class="owner-box" id="ev-owner" hidden>
+          <div class="small" id="ev-owner-text"></div>
+          <button class="btn confirm" id="ev-confirm">✓ Kadroyu Onayla</button>
+        </div>
+
+        <div class="list-head">
+          <span>Kadro <b id="ev-count">0</b>/<span id="ev-cap">12</span></span>
+          <div class="list-actions">
+            <button class="link" id="ev-share">Linki kopyala</button>
+            <button class="link danger" id="ev-delete" hidden>Sil</button>
+          </div>
+        </div>
+        <ol class="roster" id="ev-roster"></ol>
+      </div>
+    </dialog>
+
+    <!-- Oluşturma modalı -->
+    <dialog id="new-modal" class="modal">
+      <form id="new-form" class="modal-inner" method="dialog">
+        <button class="x" type="button" data-close aria-label="Kapat">✕</button>
+        <h2>Yeni Oylama</h2>
+        <label>Başlık
+          <input name="title" maxlength="120" required placeholder="Salı Atatürk Kapalı Spor Salonu 21:30-23:30" />
+        </label>
+        <label>Konum <span class="muted">(opsiyonel)</span>
+          <input name="location" maxlength="120" placeholder="Atatürk Kapalı Spor Salonu" />
+        </label>
+        <label>Not <span class="muted">(opsiyonel)</span>
+          <textarea name="note" maxlength="400" rows="2" placeholder="Ücret, IBAN, kurallar..."></textarea>
+        </label>
+        <label>Maç tarihi ve saati
+          <input name="matchAt" type="datetime-local" required />
+          <span class="hint muted">Maç başladığında oylama otomatik silinir.</span>
+        </label>
+        <div class="row">
+          <label class="grow">Oylama açılış zamanı
+            <input name="openAt" type="datetime-local" step="1" />
+          </label>
+          <label class="cap">Kontenjan
+            <input name="capacity" type="number" min="1" max="100" value="12" />
+          </label>
+        </div>
+        <label class="check"><input type="checkbox" name="now" /> Oylamayı hemen aç</label>
+        <div class="form-err" id="new-err"></div>
+        <button class="btn primary block" type="submit">Oluştur</button>
+      </form>
+    </dialog>
+
+    <div id="toast" class="toast" role="status" aria-live="polite"></div>
+    <script src="app.js"></script>
+  </body>
+</html>

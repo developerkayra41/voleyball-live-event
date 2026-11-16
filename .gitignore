@@ -1,0 +1,8 @@
+node_modules/
+dist/
+public/app.js
+public/app.js.map
+data.json
+data.json.tmp
+.env
+.claude/

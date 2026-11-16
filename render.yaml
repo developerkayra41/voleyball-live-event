@@ -1,0 +1,25 @@
+# Render Blueprint: Render bu dosyayı okuyup servisi otomatik kurar.
+# Oylamalar bellekte tutulduğu için servis TEK kopya çalışmalı (ölçeklendirme yapma).
+services:
+  - type: web
+    name: voleybol-kadro
+    runtime: node
+    plan: free
+    buildCommand: npm install --include=dev && npm run build
+    startCommand: npm start
+    healthCheckPath: /
+    envVars:
+      - key: NODE_VERSION
+        value: "22"
+
+    # --- Kalıcı veri (ücretli plan) ---
+    # Ücretsiz planda disk silinir: servis uyursa ya da yeniden deploy edilirse
+    # oylamalar kaybolur. Kalıcı olsun istersen plan'ı "starter" yap ve
+    # aşağıdaki satırların başındaki # işaretlerini kaldır.
+    # disk:
+    #   name: data
+    #   mountPath: /var/data
+    #   sizeGB: 1
+    # (envVars altına da ekle)
+    #   - key: DATA_FILE
+    #     value: /var/data/data.json
